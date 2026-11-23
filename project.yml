@@ -1,0 +1,45 @@
+name: OpMuc
+options:
+  bundleIdPrefix: com.phongdep1234
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  OpMuc:
+    type: application
+    platform: iOS
+    sources:
+      - App/Sources
+      - App/Assets.xcassets
+    entitlements:
+      path: App/OpMuc.entitlements
+      properties:
+        com.apple.developer.nfc.readersession.formats:
+          - TAG
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: "Ốp Mực"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NFCReaderUsageDescription: "Dùng NFC để gửi ảnh lên ốp lưng mực điện tử."
+        com.apple.developer.nfc.readersession.iso7816.select-identifiers:
+          - D2760000850101
+          - D2760000850100
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phongdep1234.opmuc
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""

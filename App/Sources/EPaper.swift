@@ -1,0 +1,229 @@
+//
+//  EPaper.swift
+//  Giao thức NFC cho màn e-paper thụ động (họ Good Display / FMSC, ISO 14443-A + APDU ISO 7816).
+//  Tham khảo: https://gist.github.com/niw/3885b22d502bb1e145984d41568f202d (MIT)
+//
+
+import Foundation
+
+struct PanelSpec: CustomStringConvertible {
+    /// Kích thước bộ nhớ ảnh của màn (số điểm mỗi hàng × số hàng)
+    var width: Int
+    var height: Int
+    /// 1 = đen trắng, 2 = 4 màu
+    var bpp: Int
+    var name: String = ""
+    var fromDevice: Bool = false
+
+    var description: String {
+        let colors = bpp == 2 ? "4 màu" : "đen trắng"
+        let n = name.isEmpty ? "" : " – \(name)"
+        return "\(width)×\(height), \(colors)\(n)"
+    }
+
+    /// Kích thước ảnh dựng theo chiều dọc của ốp
+    var portraitSize: (w: Int, h: Int) { (min(width, height), max(width, height)) }
+
+    var packedByteCount: Int { width * height * bpp / 8 }
+}
+
+/// Cài đặt người dùng (đọc từ UserDefaults, chỉnh trong tab Cài đặt)
+struct TransferSettings {
+    var sizeMode: String      // "auto", "480x800", "800x480"
+    var colorMode: String     // "4", "2"
+    var swapWH: Bool
+    var rotate180: Bool
+    var mirror: Bool
+    var colorOrder: String    // "BWYR", "BWRY"
+    var reauthOnResume: Bool
+
+    static var current: TransferSettings {
+        let d = UserDefaults.standard
+        return TransferSettings(
+            sizeMode: d.string(forKey: "sizeMode") ?? "auto",
+            colorMode: d.string(forKey: "colorMode") ?? "4",
+            swapWH: d.bool(forKey: "swapWH"),
+            rotate180: d.bool(forKey: "rotate180"),
+            mirror: d.bool(forKey: "mirror"),
+            colorOrder: d.string(forKey: "colorOrder") ?? "BWYR",
+            reauthOnResume: d.object(forKey: "reauthOnResume") as? Bool ?? false
+        )
+    }
+
+    var manualSpec: PanelSpec {
+        let bpp = colorMode == "2" ? 1 : 2
+        switch sizeMode {
+        case "800x480": return PanelSpec(width: 800, height: 480, bpp: bpp)
+        default: return PanelSpec(width: 480, height: 800, bpp: bpp)
+        }
+    }
+}
+
+enum EPaper {
+    // MARK: Lệnh APDU
+    static let selectAID = Data([0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00])
+    static let auth = Data([0x00, 0x20, 0x00, 0x01, 0x04, 0x20, 0x09, 0x12, 0x10])
+    static let deviceInfo = Data([0x00, 0xD1, 0x00, 0x00, 0x00])
+    static let refreshBlocking = Data([0xF0, 0xD4, 0x85, 0x00, 0x00])
+    static let refreshNonBlocking = Data([0xF0, 0xD4, 0x85, 0x80, 0x00])
+    static let refreshStatus = Data([0xF0, 0xDE, 0x00, 0x00, 0x01])
+
+    static let blockSize = 2000
+    static let fragmentSize = 250
+
+    // MARK: Thông tin thiết bị (TLV)
+    static func tlv(_ data: Data) -> [UInt8: Data] {
+        let b = [UInt8](data)
+        var result: [UInt8: Data] = [:]
+        var i = 0
+        while i + 1 < b.count {
+            let tag = b[i]
+            let len = Int(b[i + 1])
+            let start = i + 2
+            let end = start + len
+            if end > b.count { break }
+            result[tag] = Data(b[start..<end])
+            i = end
+        }
+        return result
+    }
+
+    static func parseInfo(_ data: Data) -> PanelSpec? {
+        let t = tlv(data)
+        guard let a0 = t[0xA0], a0.count >= 7 else { return nil }
+        let b = [UInt8](a0)
+        let colorByte = b[1]
+        let bpp = (colorByte == 0x01 || colorByte == 0x47) ? 1 : 2
+        let rh = (Int(b[3]) << 8) | Int(b[4])
+        let rw = (Int(b[5]) << 8) | Int(b[6])
+        let h = rh / bpp
+        guard rw >= 16, h >= 16, rw <= 2000, h <= 2000, rw % (8 / bpp) == 0 else { return nil }
+        var spec = PanelSpec(width: rw, height: h, bpp: bpp, fromDevice: true)
+        if let c0 = t[0xC0], let name = String(data: c0, encoding: .ascii) {
+            spec.name = name.trimmingCharacters(in: .controlCharacters.union(.whitespaces))
+        }
+        return spec
+    }
+
+    // MARK: Ảnh → bộ nhớ màn
+    /// `portrait`: chỉ số màu (0 đen, 1 trắng, 2 vàng, 3 đỏ) kích thước pw×ph theo chiều dọc ốp.
+    static func buffer(portrait src: [UInt8], pw: Int, ph: Int, spec: PanelSpec, settings s: TransferSettings) -> [UInt8] {
+        // 1) Xoay 180° / lật gương theo cài đặt
+        var img = src
+        if s.rotate180 || s.mirror {
+            var out = [UInt8](repeating: 1, count: pw * ph)
+            for y in 0..<ph {
+                for x in 0..<pw {
+                    var sx = x, sy = y
+                    if s.rotate180 { sx = pw - 1 - sx; sy = ph - 1 - sy }
+                    if s.mirror { sx = pw - 1 - sx }
+                    out[y * pw + x] = src[sy * pw + sx]
+                }
+            }
+            img = out
+        }
+
+        // 2) Ghép vào bộ nhớ W×H
+        let W = spec.width, H = spec.height
+        var buf = [UInt8](repeating: 1, count: W * H)
+        if W == pw && H == ph {
+            buf = img
+        } else if W == ph && H == pw {
+            // Xoay 90° theo chiều kim đồng hồ
+            for y in 0..<H {
+                for x in 0..<W {
+                    buf[y * W + x] = img[(ph - 1 - x) * pw + y]
+                }
+            }
+        } else {
+            // Kích thước lạ: co giãn gần nhất
+            for y in 0..<H {
+                for x in 0..<W {
+                    let sx = min(pw - 1, x * pw / W)
+                    let sy = min(ph - 1, y * ph / H)
+                    buf[y * W + x] = img[sy * pw + sx]
+                }
+            }
+        }
+
+        // 3) Đổi chỉ số màu theo loại màn
+        if spec.bpp == 1 {
+            for i in buf.indices {
+                switch buf[i] {
+                case 0, 3: buf[i] = 0   // đen, đỏ → đen
+                default: buf[i] = 1     // trắng, vàng → trắng
+                }
+            }
+        } else if s.colorOrder == "BWRY" {
+            for i in buf.indices {
+                if buf[i] == 2 { buf[i] = 3 } else if buf[i] == 3 { buf[i] = 2 }
+            }
+        }
+        return buf
+    }
+
+    /// Đóng gói: mỗi hàng ghi từ phải sang trái, điểm đầu ở bit thấp.
+    static func pack(_ buf: [UInt8], width: Int, height: Int, bpp: Int) -> Data {
+        let ppb = 8 / bpp
+        let bytesPerLine = width / ppb
+        var out = Data(capacity: bytesPerLine * height)
+        for y in 0..<height {
+            let row = y * width
+            for k in 0..<bytesPerLine {
+                let x0 = (bytesPerLine - 1 - k) * ppb
+                var byte: UInt8 = 0
+                for p in 0..<ppb {
+                    byte |= (buf[row + x0 + p] & UInt8((1 << bpp) - 1)) << UInt8(p * bpp)
+                }
+                out.append(byte)
+            }
+        }
+        return out
+    }
+
+    /// Chia khối 2000 byte → nén LZO1X → mảnh 250 byte → lệnh F0 D3.
+    static func imageAPDUs(packed: Data) -> [[Data]] {
+        let bytes = [UInt8](packed)
+        var blocks: [[Data]] = []
+        var blockIndex = 0
+        var start = 0
+        while start < bytes.count {
+            let end = min(start + blockSize, bytes.count)
+            let compressed = [UInt8](lzoCompress(Data(bytes[start..<end])))
+            var frags: [Data] = []
+            var fStart = 0
+            var fIndex = 0
+            while fStart < compressed.count {
+                let fEnd = min(fStart + fragmentSize, compressed.count)
+                let isLast = fEnd == compressed.count
+                var cmd = Data([0xF0, 0xD3, 0x00, isLast ? 0x01 : 0x00, UInt8(fEnd - fStart + 2)])
+                cmd.append(UInt8(blockIndex & 0xFF))
+                cmd.append(UInt8(fIndex & 0xFF))
+                cmd.append(contentsOf: compressed[fStart..<fEnd])
+                frags.append(cmd)
+                fStart = fEnd
+                fIndex += 1
+            }
+            blocks.append(frags)
+            blockIndex += 1
+            start = end
+        }
+        return blocks
+    }
+}
+
+extension Data {
+    var hex: String { map { String(format: "%02X", $0) }.joined(separator: " ") }
+
+    init?(hexString: String) {
+        let chars = hexString.uppercased().filter { "0123456789ABCDEF".contains($0) }
+        guard !chars.isEmpty, chars.count % 2 == 0 else { return nil }
+        var d = Data()
+        var it = chars.makeIterator()
+        while let a = it.next(), let b = it.next() {
+            guard let v = UInt8(String([a, b]), radix: 16) else { return nil }
+            d.append(v)
+        }
+        self = d
+    }
+}

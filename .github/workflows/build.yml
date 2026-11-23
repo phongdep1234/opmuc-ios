@@ -1,0 +1,50 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild -project OpMuc.xcodeproj -scheme OpMuc -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/OpMuc.app Payload/
+          cp App/OpMuc.entitlements OpMuc-entitlements.plist
+          zip -qry OpMuc-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpMuc-ipa
+          path: |
+            OpMuc-unsigned.ipa
+            OpMuc-entitlements.plist
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Ốp Mực build ${{ github.run_number }}
+          files: |
+            OpMuc-unsigned.ipa
+            OpMuc-entitlements.plist
