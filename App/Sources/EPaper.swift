@@ -36,6 +36,8 @@ struct TransferSettings {
     var mirror: Bool
     var colorOrder: String    // "BWYR", "BWRY"
     var reauthOnResume: Bool
+    var compress: Bool
+    var fragmentSize: Int
 
     static var current: TransferSettings {
         let d = UserDefaults.standard
@@ -46,7 +48,9 @@ struct TransferSettings {
             rotate180: d.bool(forKey: "rotate180"),
             mirror: d.bool(forKey: "mirror"),
             colorOrder: d.string(forKey: "colorOrder") ?? "BWYR",
-            reauthOnResume: d.object(forKey: "reauthOnResume") as? Bool ?? false
+            reauthOnResume: d.object(forKey: "reauthOnResume") as? Bool ?? false,
+            compress: d.object(forKey: "compress") as? Bool ?? true,
+            fragmentSize: { let v = d.integer(forKey: "fragmentSize"); return v > 0 ? v : 250 }()
         )
     }
 
@@ -54,7 +58,14 @@ struct TransferSettings {
         let bpp = colorMode == "2" ? 1 : 2
         switch sizeMode {
         case "800x480": return PanelSpec(width: 800, height: 480, bpp: bpp)
-        default: return PanelSpec(width: 480, height: 800, bpp: bpp)
+        case "480x800": return PanelSpec(width: 480, height: 800, bpp: bpp)
+        case "240x416": return PanelSpec(width: 240, height: 416, bpp: bpp)
+        default:
+            // Thông số đã đọc từ ốp lần trước, mặc định 240×416 (màn 3,7 inch 4 màu)
+            let d = UserDefaults.standard
+            let w = d.integer(forKey: "detW"), h = d.integer(forKey: "detH")
+            if w > 0 && h > 0 { return PanelSpec(width: w, height: h, bpp: bpp) }
+            return PanelSpec(width: 240, height: 416, bpp: bpp)
         }
     }
 }
@@ -182,14 +193,30 @@ enum EPaper {
     }
 
     /// Chia khối 2000 byte → nén LZO1X → mảnh 250 byte → lệnh F0 D3.
-    static func imageAPDUs(packed: Data) -> [[Data]] {
+    static func saveDetected(_ spec: PanelSpec) {
+        let d = UserDefaults.standard
+        d.set(spec.width, forKey: "detW")
+        d.set(spec.height, forKey: "detH")
+        d.set(spec.bpp, forKey: "detBpp")
+    }
+
+    /// Kích thước ảnh dọc để xem trước (theo ốp đã nhận diện)
+    static var previewSize: (w: Int, h: Int) {
+        let d = UserDefaults.standard
+        let w = d.integer(forKey: "detW"), h = d.integer(forKey: "detH")
+        if w > 0 && h > 0 { return (min(w, h), max(w, h)) }
+        return (240, 416)
+    }
+
+    static func imageAPDUs(packed: Data, compress: Bool = true, fragmentSize: Int = 250) -> [[Data]] {
         let bytes = [UInt8](packed)
         var blocks: [[Data]] = []
         var blockIndex = 0
         var start = 0
         while start < bytes.count {
             let end = min(start + blockSize, bytes.count)
-            let compressed = [UInt8](lzoCompress(Data(bytes[start..<end])))
+            let raw = Data(bytes[start..<end])
+            let compressed = [UInt8](compress ? lzoCompress(raw) : raw)
             var frags: [Data] = []
             var fStart = 0
             var fIndex = 0

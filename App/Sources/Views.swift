@@ -41,9 +41,13 @@ struct PhotoView: View {
     @State private var rendering = false
     @State private var renderToken = 0
 
+    @AppStorage("detW") private var detW = 0
+    @AppStorage("detH") private var detH = 0
+
     private let frameW: CGFloat = 264
-    private var frameH: CGFloat { frameW * 5 / 3 }
-    private let pw = 480, ph = 800
+    private var pw: Int { EPaper.previewSize.w }
+    private var ph: Int { EPaper.previewSize.h }
+    private var frameH: CGFloat { frameW * CGFloat(ph) / CGFloat(pw) }
 
     var body: some View {
         NavigationView {
@@ -95,6 +99,8 @@ struct PhotoView: View {
         .navigationViewStyle(.stack)
         .onChange(of: pickerItem) { item in load(item) }
         .onChange(of: colorMode) { _ in rerender() }
+        .onChange(of: detW) { _ in rerender() }
+        .onChange(of: detH) { _ in rerender() }
     }
 
     private var caseFrame: some View {
@@ -342,6 +348,10 @@ struct SettingsView: View {
     @AppStorage("mirror") private var mirror = false
     @AppStorage("colorOrder") private var colorOrder = "BWYR"
     @AppStorage("reauthOnResume") private var reauthOnResume = false
+    @AppStorage("compress") private var compress = true
+    @AppStorage("fragmentSize") private var fragmentSize = 250
+    @AppStorage("detW") private var detW = 0
+    @AppStorage("detH") private var detH = 0
 
     var body: some View {
         NavigationView {
@@ -349,6 +359,7 @@ struct SettingsView: View {
                 Section {
                     Picker("Kích thước", selection: $sizeMode) {
                         Text("Tự động (đọc từ ốp)").tag("auto")
+                        Text("240 × 416").tag("240x416")
                         Text("480 × 800").tag("480x800")
                         Text("800 × 480").tag("800x480")
                     }
@@ -359,7 +370,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Màn hình ốp")
                 } footer: {
-                    Text("Ốp của bạn: 3,97 inch, 480×800, 4 màu. Để “Tự động” trước; nếu ốp không trả thông số thì chọn tay.")
+                    Text(detW > 0 ? "Ốp đã nhận diện: \(detW)×\(detH). Để “Tự động” là đúng nhất." : "Để “Tự động”: app đọc kích thước từ ốp. Bấm “Đọc thông tin ốp” ở tab Kiểm tra trước.")
                 }
 
                 Section {
@@ -378,10 +389,17 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("Xác thực lại sau khi kết nối lại", isOn: $reauthOnResume)
+                    Toggle("Nén dữ liệu (LZO)", isOn: $compress)
+                    Picker("Cỡ mỗi gói", selection: $fragmentSize) {
+                        Text("250 byte").tag(250)
+                        Text("200 byte").tag(200)
+                        Text("128 byte").tag(128)
+                        Text("64 byte").tag(64)
+                    }
                 } header: {
                     Text("Nâng cao")
                 } footer: {
-                    Text("iOS chỉ cho mỗi lần kết nối NFC khoảng 20 giây, nên app tự kết nối lại giữa chừng. Nếu ảnh gửi xong mà ốp không đổi, thử bật/tắt mục này.")
+                    Text("Chỉ đổi khi gửi ảnh bị lỗi. iOS chỉ cho mỗi lần kết nối NFC khoảng 20 giây, nên app tự kết nối lại giữa chừng.")
                 }
 
                 Section {

@@ -223,6 +223,7 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
         try await tx(link, EPaper.auth, "Xác thực", mustSucceed: false)
         let info = try await tx(link, EPaper.deviceInfo, "Đọc thông tin", mustSucceed: false)
         if info.ok, let spec = EPaper.parseInfo(info.data) {
+            EPaper.saveDetected(spec)
             log.add("Màn hình ốp: \(spec)")
             succeed(session, "Nhận ra ốp: \(spec). Có thể gửi ảnh.")
         } else if info.ok {
@@ -255,6 +256,7 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                 let info = try await tx(link, EPaper.deviceInfo, "Đọc thông tin", mustSucceed: false)
                 if info.ok, let s = EPaper.parseInfo(info.data) {
                     spec = s
+                    EPaper.saveDetected(s)
                 } else {
                     log.add("Không đọc được thông số, dùng mặc định \(spec)")
                 }
@@ -269,10 +271,10 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
             guard portrait.count == pw * ph else { throw CaseError.badAPDU }
             let buf = EPaper.buffer(portrait: portrait, pw: pw, ph: ph, spec: spec, settings: settings)
             let packed = EPaper.pack(buf, width: spec.width, height: spec.height, bpp: spec.bpp)
-            let b = EPaper.imageAPDUs(packed: packed)
+            let b = EPaper.imageAPDUs(packed: packed, compress: settings.compress, fragmentSize: settings.fragmentSize)
             blocks = b
             totalFragments = b.reduce(0) { $0 + $1.count }
-            log.add("Dữ liệu \(packed.count) byte → \(b.count) khối, \(totalFragments) lệnh")
+            log.add("Dữ liệu \(packed.count) byte → \(b.count) khối, \(totalFragments) lệnh (nén: \(settings.compress ? "có" : "không"), mảnh \(settings.fragmentSize) byte)")
         } else if settings.reauthOnResume {
             if link.isMifare {
                 try await tx(link, EPaper.selectAID, "Chọn ứng dụng", mustSucceed: false)
@@ -287,8 +289,19 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                 reconnect(session)
                 return
             }
-            for frag in blocks[nextBlock] {
-                try await sendWithRetry(link, frag, "Khối \(nextBlock + 1)/\(blocks.count)")
+            for (fi, frag) in blocks[nextBlock].enumerated() {
+                let label = "Khối \(nextBlock + 1)/\(blocks.count) mảnh \(fi + 1)"
+                // Ghi chi tiết vài lệnh đầu để dễ gỡ lỗi
+                if sentFragments < 3 {
+                    log.add("→ \(label): \(frag.prefix(16).hex) … (\(frag.count) byte)")
+                }
+                do {
+                    try await sendWithRetry(link, frag, label)
+                } catch {
+                    log.add("✗ \(label) lỗi: \(error.localizedDescription)")
+                    throw error
+                }
+                if sentFragments < 3 { log.add("← \(label): OK") }
                 sentFragments += 1
             }
             nextBlock += 1
