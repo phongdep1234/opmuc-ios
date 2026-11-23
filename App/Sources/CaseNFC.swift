@@ -11,6 +11,8 @@ enum NFCJob {
     /// Nhận thông số màn, trả về ảnh dọc (chỉ số màu) đúng kích thước `spec.portraitSize`
     case send(render: (PanelSpec) -> [UInt8])
     case raw([Data])
+    /// Các nhóm lệnh thử; mỗi nhóm chạy trong một lần kết nối, lỗi thì sang nhóm sau
+    case probe([(String, [Data])])
 }
 
 enum CaseError: LocalizedError {
@@ -197,6 +199,8 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                 try await runSend(link, session, render: render, resuming: resuming)
             case .raw(let cmds):
                 try await runRaw(link, session, cmds)
+            case .probe(let groups):
+                await runProbe(link, session, groups)
             }
         } catch {
             log.add("Lỗi: \(error.localizedDescription)")
@@ -231,6 +235,33 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
         } else {
             succeed(session, "Ốp không theo giao thức quen thuộc (mã \(info.sw)). Sao chép nhật ký gửi mình nhé.")
         }
+    }
+
+    private var probeIndex = 0
+
+    private func runProbe(_ link: TagLink, _ session: NFCTagReaderSession, _ groups: [(String, [Data])]) async {
+        while probeIndex < groups.count {
+            let (name, cmds) = groups[probeIndex]
+            probeIndex += 1
+            session.alertMessage = "Đang dò \(probeIndex)/\(groups.count)… giữ yên máy"
+            log.add("=== Thử \(probeIndex): \(name) ===")
+            do {
+                for (i, c) in cmds.enumerated() {
+                    let shown = c.count > 24 ? "\(c.prefix(12).hex) … (\(c.count) byte)" : c.hex
+                    log.add("→ \(shown)")
+                    let r = try await tx(link, c, "Lệnh \(i + 1)", quiet: true, mustSucceed: false)
+                    log.add("← SW \(r.sw)\(r.data.isEmpty ? "" : " | \(r.data.hex)")")
+                }
+            } catch {
+                log.add("✗ Không trả lời: \(error.localizedDescription)")
+                if probeIndex < groups.count {
+                    reconnects += 1
+                    session.restartPolling()
+                    return
+                }
+            }
+        }
+        succeed(session, "Dò xong. Bấm Sao chép nhật ký gửi cho Claude.")
     }
 
     private func runRaw(_ link: TagLink, _ session: NFCTagReaderSession, _ cmds: [Data]) async throws {

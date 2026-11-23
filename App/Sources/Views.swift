@@ -270,6 +270,12 @@ struct CheckView: View {
                         Label("Đọc thông tin ốp", systemImage: "magnifyingglass")
                     }
                     .disabled(runner.busy)
+                    Button {
+                        runner.run(.probe(EPaper.probeGroups))
+                    } label: {
+                        Label("Dò giao thức (khi gửi ảnh bị lỗi)", systemImage: "stethoscope")
+                    }
+                    .disabled(runner.busy)
                     if !runner.message.isEmpty {
                         Text(runner.message).font(.callout)
                             .foregroundColor(runner.lastOK ? .green : .orange)

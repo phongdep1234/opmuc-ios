@@ -193,6 +193,28 @@ enum EPaper {
     }
 
     /// Chia khối 2000 byte → nén LZO1X → mảnh 250 byte → lệnh F0 D3.
+    static func dataAPDU(p1: UInt8 = 0, last: Bool = true, payload n: Int, fill: UInt8 = 0x55) -> Data {
+        var d = Data([0xF0, 0xD3, p1, last ? 0x01 : 0x00, UInt8(n + 2), 0x00, 0x00])
+        d.append(contentsOf: [UInt8](repeating: fill, count: n))
+        return d
+    }
+
+    /// Bộ lệnh dò giao thức (không làm mới màn hình)
+    static var probeGroups: [(String, [Data])] {
+        let d8 = Data([0xF0, 0xD8, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0C])
+        return [
+            ("Lệnh trạng thái F0 DE", [Data([0xF0, 0xDE, 0x00, 0x00, 0x01])]),
+            ("Gói ảnh 16 byte", [dataAPDU(payload: 16)]),
+            ("Gói ảnh 64 byte", [dataAPDU(payload: 64)]),
+            ("Gói ảnh 128 byte", [dataAPDU(payload: 128)]),
+            ("Gói ảnh 200 byte", [dataAPDU(payload: 200)]),
+            ("Cấu hình màn F0 D8 rồi gói 64 byte", [d8, dataAPDU(payload: 64)]),
+            ("Gói ảnh 64 byte, P1=01", [dataAPDU(p1: 1, payload: 64)]),
+            ("Lệnh lạ F0 D3 rỗng", [Data([0xF0, 0xD3, 0x00, 0x00, 0x02, 0x00, 0x00])]),
+            ("Đọc thông tin lần nữa", [deviceInfo])
+        ]
+    }
+
     static func saveDetected(_ spec: PanelSpec) {
         let d = UserDefaults.standard
         d.set(spec.width, forKey: "detW")
