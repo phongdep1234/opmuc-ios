@@ -227,7 +227,27 @@ enum EPaper {
     }
 
     /// Bộ lệnh dò giao thức (không làm mới màn hình)
+    static func select(_ aidHex: String) -> Data {
+        let aid = Data(hexString: aidHex) ?? Data()
+        var d = Data([0x00, 0xA4, 0x04, 0x00, UInt8(aid.count)])
+        d.append(aid)
+        d.append(0x00)
+        return d
+    }
+
     static var probeGroups: [(String, [Data])] {
+        let deSt = Data([0xF0, 0xDE, 0x00, 0x00, 0x01])
+        var aidGroups: [(String, [Data])] = []
+        for aid in ["201EA001", "00000001", "A00000000386980701", "D2760000850101"] {
+            aidGroups.append(("Chọn ứng dụng \(aid) rồi lệnh F0", [select(aid), wait, deSt, access, deviceInfo]))
+        }
+        aidGroups.append(("Chọn ứng dụng kiểu P2=0C 201EA001", [Data([0x00, 0xA4, 0x04, 0x0C, 0x04, 0x20, 0x1E, 0xA0, 0x01]), deSt]))
+        aidGroups.append(("Lệnh 00 D0 có dữ liệu", [Data([0x00, 0xD0, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0E])]))
+        aidGroups.append(("Lệnh 00 4A", [Data([0x00, 0x4A, 0x00, 0x00, 0x00])]))
+        return aidGroups + oldProbeGroups
+    }
+
+    static var oldProbeGroups: [(String, [Data])] {
         let d8 = Data([0xF0, 0xD8, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0C])
         let de = Data([0xF0, 0xDE, 0x00, 0x00, 0x01])
         var d2 = Data([0xF0, 0xD2, 0x00, 0x00, 0x10])

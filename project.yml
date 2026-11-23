@@ -33,6 +33,9 @@ targets:
         NFCReaderUsageDescription: "Dùng NFC để gửi ảnh lên ốp lưng mực điện tử."
         com.apple.developer.nfc.readersession.iso7816.select-identifiers:
           - D2760000850101
+          - 201EA001
+          - "00000001"
+          - A00000000386980701
           - D2760000850100
     settings:
       base:
