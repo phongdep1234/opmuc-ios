@@ -237,13 +237,16 @@ enum EPaper {
 
     static var probeGroups: [(String, [Data])] {
         let deSt = Data([0xF0, 0xDE, 0x00, 0x00, 0x01])
-        var aidGroups: [(String, [Data])] = []
-        for aid in ["201EA001", "00000001", "A00000000386980701", "D2760000850101"] {
-            aidGroups.append(("Chọn ứng dụng \(aid) rồi lệnh F0", [select(aid), wait, deSt, access, deviceInfo]))
-        }
-        aidGroups.append(("Chọn ứng dụng kiểu P2=0C 201EA001", [Data([0x00, 0xA4, 0x04, 0x0C, 0x04, 0x20, 0x1E, 0xA0, 0x01]), deSt]))
-        aidGroups.append(("Lệnh 00 D0 có dữ liệu", [Data([0x00, 0xD0, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0E])]))
-        aidGroups.append(("Lệnh 00 4A", [Data([0x00, 0x4A, 0x00, 0x00, 0x00])]))
+        func raw(_ h: String) -> Data { var d = Data([0xEE]); d.append(Data(hexString: h)!); return d }
+        let aidGroups: [(String, [Data])] = [
+            ("Đọc thông tin (APDU)", [deviceInfo]),
+            ("Trạng thái F0 DE (APDU)", [deSt]),
+            ("Đọc thông tin (thô)", [raw("00D1000000")]),
+            ("Trạng thái F0 DE (thô)", [raw("F0DE000001")]),
+            ("Quyền F0 D8 (thô)", [raw("F0D800000500000000 0E")]),
+            ("Trạng thái F0 DE không Le (thô)", [raw("F0DE0000")]),
+            ("Chọn ứng dụng NDEF rồi F0 DE (APDU)", [selectAID, deSt])
+        ]
         return aidGroups + oldProbeGroups
     }
 

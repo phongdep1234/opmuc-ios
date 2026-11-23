@@ -39,6 +39,14 @@ enum TagLink {
 
     var isMifare: Bool { if case .mifare = self { return true } else { return false } }
 
+    /// Gửi khung thô qua đường MIFARE (iOS vẫn bọc ISO-DEP)
+    func sendRaw(_ bytes: Data) async throws -> Data {
+        switch self {
+        case .mifare(let t): return try await t.sendMiFareCommand(commandPacket: bytes)
+        case .iso7816: throw CaseError.unsupportedTag("ISO 7816 (không gửi thô được)")
+        }
+    }
+
     func send(_ bytes: Data) async throws -> (Data, UInt8, UInt8) {
         guard let apdu = NFCISO7816APDU(data: bytes) else { throw CaseError.badAPDU }
         switch self {
@@ -286,6 +294,13 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                     if c.isEmpty {
                         log.add("… chờ nạp điện \(settings.prechargeMs) ms")
                         try? await Task.sleep(nanoseconds: UInt64(max(settings.prechargeMs, 500)) * 1_000_000)
+                        continue
+                    }
+                    if c.first == 0xEE {
+                        let raw = c.dropFirst()
+                        log.add("→ (thô MIFARE) \(Data(raw).hex)")
+                        let resp = try await link.sendRaw(Data(raw))
+                        log.add("← (thô) \(resp.hex)")
                         continue
                     }
                     let shown = c.count > 24 ? "\(c.prefix(12).hex) … (\(c.count) byte)" : c.hex
