@@ -13,6 +13,8 @@ enum NFCJob {
     case raw([Data])
     /// Các nhóm lệnh thử; mỗi nhóm chạy trong một lần kết nối, lỗi thì sang nhóm sau
     case probe([(String, [Data])])
+    /// Quét nhiều lệnh, mỗi lệnh một dòng nhật ký
+    case scan([Data])
 }
 
 enum CaseError: LocalizedError {
@@ -201,6 +203,8 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                 try await runRaw(link, session, cmds)
             case .probe(let groups):
                 await runProbe(link, session, groups)
+            case .scan(let cmds):
+                await runScan(link, session, cmds)
             }
         } catch {
             log.add("Lỗi: \(error.localizedDescription)")
@@ -238,6 +242,38 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
     }
 
     private var probeIndex = 0
+    private var scanSummary: [String: [String]] = [:]
+
+    private func runScan(_ link: TagLink, _ session: NFCTagReaderSession, _ cmds: [Data]) async {
+        while probeIndex < cmds.count {
+            let c = cmds[probeIndex]
+            probeIndex += 1
+            if probeIndex % 16 == 0 {
+                session.alertMessage = "Đang quét \(probeIndex)/\(cmds.count)… giữ yên máy"
+            }
+            let key = String(format: "%02X %02X", c[0], c[1])
+            do {
+                let (data, a, b) = try await link.send(c)
+                let sw = String(format: "%02X%02X", a, b)
+                if sw == "6D00" || sw == "6E00" || sw == "6A81" || sw == "6986" {
+                    scanSummary[sw, default: []].append(key)
+                } else {
+                    log.add("★ \(c.hex) → SW \(sw)\(data.isEmpty ? "" : " | \(data.prefix(40).hex)")")
+                }
+            } catch {
+                scanSummary["lỗi", default: []].append(key)
+                if probeIndex < cmds.count {
+                    reconnects += 1
+                    session.restartPolling()
+                    return
+                }
+            }
+        }
+        for (sw, keys) in scanSummary.sorted(by: { $0.key < $1.key }) {
+            log.add("SW \(sw) (\(keys.count) lệnh): \(keys.joined(separator: ", "))")
+        }
+        succeed(session, "Quét xong. Bấm Sao chép nhật ký gửi cho Claude.")
+    }
 
     private func runProbe(_ link: TagLink, _ session: NFCTagReaderSession, _ groups: [(String, [Data])]) async {
         while probeIndex < groups.count {

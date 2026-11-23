@@ -215,6 +215,22 @@ enum EPaper {
         ]
     }
 
+    /// Quét lệnh: CLA 00 với mọi INS, và các CLA khác với INS D0–DF
+    static var scanCommands: [Data] {
+        var out: [Data] = []
+        for ins in 0...255 {
+            // Bỏ qua các lệnh ghi/xoá chuẩn có thể làm hỏng dữ liệu thẻ
+            if [0x0E, 0xD6, 0xD8, 0xDA, 0xDC, 0xE0, 0xE4, 0xE6, 0xE8, 0x44, 0x24, 0x2C].contains(ins) { continue }
+            out.append(Data([0x00, UInt8(ins), 0x00, 0x00]))
+        }
+        for cla in [0x80, 0x90, 0xA0, 0xB0, 0xF0] {
+            for ins in 0xD0...0xDF {
+                out.append(Data([UInt8(cla), UInt8(ins), 0x00, 0x00]))
+            }
+        }
+        return out
+    }
+
     static func saveDetected(_ spec: PanelSpec) {
         let d = UserDefaults.standard
         d.set(spec.width, forKey: "detW")

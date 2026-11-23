@@ -276,6 +276,12 @@ struct CheckView: View {
                         Label("Dò giao thức (khi gửi ảnh bị lỗi)", systemImage: "stethoscope")
                     }
                     .disabled(runner.busy)
+                    Button {
+                        runner.run(.scan(EPaper.scanCommands))
+                    } label: {
+                        Label("Quét lệnh của ốp", systemImage: "list.bullet.rectangle")
+                    }
+                    .disabled(runner.busy)
                     if !runner.message.isEmpty {
                         Text(runner.message).font(.callout)
                             .foregroundColor(runner.lastOK ? .green : .orange)
