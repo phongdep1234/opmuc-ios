@@ -38,6 +38,10 @@ struct TransferSettings {
     var reauthOnResume: Bool
     var compress: Bool
     var fragmentSize: Int
+    /// Thời gian chờ ốp nạp điện sau mỗi lần kết nối (ms)
+    var prechargeMs: Int
+    /// "msb": trái→phải, điểm đầu ở bit cao (FMSC); "lsb": phải→trái, điểm đầu ở bit thấp
+    var bitOrder: String
 
     static var current: TransferSettings {
         let d = UserDefaults.standard
@@ -50,7 +54,9 @@ struct TransferSettings {
             colorOrder: d.string(forKey: "colorOrder") ?? "BWYR",
             reauthOnResume: d.object(forKey: "reauthOnResume") as? Bool ?? false,
             compress: d.object(forKey: "compress") as? Bool ?? true,
-            fragmentSize: { let v = d.integer(forKey: "fragmentSize"); return v > 0 ? v : 250 }()
+            fragmentSize: { let v = d.integer(forKey: "fragmentSize"); return v > 0 ? v : 250 }(),
+            prechargeMs: d.object(forKey: "prechargeMs") as? Int ?? 2000,
+            bitOrder: d.string(forKey: "bitOrder") ?? "msb"
         )
     }
 
@@ -74,6 +80,11 @@ enum EPaper {
     // MARK: Lệnh APDU
     static let selectAID = Data([0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00])
     static let auth = Data([0x00, 0x20, 0x00, 0x01, 0x04, 0x20, 0x09, 0x12, 0x10])
+    /// Kiểm tra quyền truy cập (FMSC). 6985 = cần PIN
+    static let access = Data([0xF0, 0xD8, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0E])
+    /// PIN mặc định của nhà máy FMSC
+    static let pinAuth = Data([0x00, 0x20, 0x00, 0x01, 0x05, 0x52, 0x65, 0x69, 0x99, 0x19])
+    static let wait = Data()
     static let deviceInfo = Data([0x00, 0xD1, 0x00, 0x00, 0x00])
     static let refreshBlocking = Data([0xF0, 0xD4, 0x85, 0x00, 0x00])
     static let refreshNonBlocking = Data([0xF0, 0xD4, 0x85, 0x80, 0x00])
@@ -174,8 +185,24 @@ enum EPaper {
     }
 
     /// Đóng gói: mỗi hàng ghi từ phải sang trái, điểm đầu ở bit thấp.
-    static func pack(_ buf: [UInt8], width: Int, height: Int, bpp: Int) -> Data {
+    static func pack(_ buf: [UInt8], width: Int, height: Int, bpp: Int, order: String = "lsb") -> Data {
         let ppb = 8 / bpp
+        if order == "msb" {
+            let bytesPerLine = width / ppb
+            var out = Data(capacity: bytesPerLine * height)
+            let mask = UInt8((1 << bpp) - 1)
+            for y in 0..<height {
+                let row = y * width
+                for k in 0..<bytesPerLine {
+                    var byte: UInt8 = 0
+                    for p in 0..<ppb {
+                        byte = (byte << UInt8(bpp)) | (buf[row + k * ppb + p] & mask)
+                    }
+                    out.append(byte)
+                }
+            }
+            return out
+        }
         let bytesPerLine = width / ppb
         var out = Data(capacity: bytesPerLine * height)
         for y in 0..<height {
@@ -202,7 +229,15 @@ enum EPaper {
     /// Bộ lệnh dò giao thức (không làm mới màn hình)
     static var probeGroups: [(String, [Data])] {
         let d8 = Data([0xF0, 0xD8, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x0C])
+        let de = Data([0xF0, 0xDE, 0x00, 0x00, 0x01])
+        var d2 = Data([0xF0, 0xD2, 0x00, 0x00, 0x10])
+        d2.append(contentsOf: [UInt8](repeating: 0x55, count: 16))
         return [
+            ("Chờ nạp 2 giây rồi lệnh trạng thái", [wait, de]),
+            ("Chờ nạp rồi kiểm tra quyền F0 D8", [wait, access, de]),
+            ("Chờ nạp, PIN nhà máy, rồi F0 D8", [wait, pinAuth, access]),
+            ("Chờ nạp, quyền, gói thô F0 D2 16 byte", [wait, access, d2]),
+            ("Chờ nạp, quyền, gói nén F0 D3 16 byte", [wait, access, dataAPDU(payload: 16)]),
             ("Lệnh trạng thái F0 DE", [Data([0xF0, 0xDE, 0x00, 0x00, 0x01])]),
             ("Gói ảnh 16 byte", [dataAPDU(payload: 16)]),
             ("Gói ảnh 64 byte", [dataAPDU(payload: 64)]),
@@ -244,6 +279,23 @@ enum EPaper {
         let w = d.integer(forKey: "detW"), h = d.integer(forKey: "detH")
         if w > 0 && h > 0 { return (min(w, h), max(w, h)) }
         return (240, 416)
+    }
+
+    /// F0 D2: gửi thô không nén, mỗi gói 250 byte (P1 = ô ảnh, P2 = số thứ tự gói). Nhóm 8 gói/khối.
+    static func rawAPDUs(packed: Data, chunk: Int = 250) -> [[Data]] {
+        let bytes = [UInt8](packed)
+        var all: [Data] = []
+        var off = 0
+        var idx = 0
+        while off < bytes.count {
+            let end = min(off + chunk, bytes.count)
+            var cmd = Data([0xF0, 0xD2, 0x00, UInt8(idx & 0xFF), UInt8(end - off)])
+            cmd.append(contentsOf: bytes[off..<end])
+            all.append(cmd)
+            off = end
+            idx += 1
+        }
+        return stride(from: 0, to: all.count, by: 8).map { Array(all[$0..<min($0 + 8, all.count)]) }
     }
 
     static func imageAPDUs(packed: Data, compress: Bool = true, fragmentSize: Int = 250) -> [[Data]] {

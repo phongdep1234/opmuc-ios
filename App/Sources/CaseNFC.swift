@@ -283,6 +283,11 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
             log.add("=== Thử \(probeIndex): \(name) ===")
             do {
                 for (i, c) in cmds.enumerated() {
+                    if c.isEmpty {
+                        log.add("… chờ nạp điện \(settings.prechargeMs) ms")
+                        try? await Task.sleep(nanoseconds: UInt64(max(settings.prechargeMs, 500)) * 1_000_000)
+                        continue
+                    }
                     let shown = c.count > 24 ? "\(c.prefix(12).hex) … (\(c.count) byte)" : c.hex
                     log.add("→ \(shown)")
                     let r = try await tx(link, c, "Lệnh \(i + 1)", quiet: true, mustSucceed: false)
@@ -310,14 +315,29 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
         succeed(session, "Đã gửi \(cmds.count) lệnh. Xem kết quả trong nhật ký.")
     }
 
-    private func runSend(_ link: TagLink, _ session: NFCTagReaderSession, render: (PanelSpec) -> [UInt8], resuming: Bool) async throws {
-        if !resuming {
-            if link.isMifare {
-                try await tx(link, EPaper.selectAID, "Chọn ứng dụng", mustSucceed: false)
-            }
-            let auth = try await tx(link, EPaper.auth, "Xác thực", mustSucceed: false)
-            if !auth.ok { log.add("Xác thực không thành công, vẫn thử tiếp…") }
+    /// Chờ ốp nạp điện rồi xin quyền (F0 D8, cần thì PIN)
+    private func powerUpAndAccess(_ link: TagLink, _ session: NFCTagReaderSession) async throws {
+        session.alertMessage = "Đang nạp điện cho ốp… giữ yên máy"
+        log.add("… chờ nạp điện \(settings.prechargeMs) ms")
+        try? await Task.sleep(nanoseconds: UInt64(max(settings.prechargeMs, 0)) * 1_000_000)
+        let a = try await tx(link, EPaper.access, "Kiểm tra quyền", mustSucceed: false)
+        if a.ok { return }
+        if a.sw1 == 0x69 && a.sw2 == 0x85 {
+            let p = try await tx(link, EPaper.pinAuth, "PIN nhà máy", mustSucceed: false)
+            if !p.ok { log.add("PIN bị từ chối, vẫn thử tiếp…") }
+            try await tx(link, EPaper.access, "Kiểm tra quyền lần 2", mustSucceed: false)
+        } else {
+            log.add("Kiểm tra quyền trả \(a.sw), vẫn thử tiếp…")
+        }
+    }
 
+    private var refreshPending = false
+
+    private func runSend(_ link: TagLink, _ session: NFCTagReaderSession, render: (PanelSpec) -> [UInt8], resuming: Bool) async throws {
+        if link.isMifare {
+            try await tx(link, EPaper.selectAID, "Chọn ứng dụng", mustSucceed: false)
+        }
+        if !resuming {
             var spec = settings.manualSpec
             if settings.sizeMode == "auto" {
                 let info = try await tx(link, EPaper.deviceInfo, "Đọc thông tin", mustSucceed: false)
@@ -332,23 +352,20 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
             if settings.swapWH { swap(&spec.width, &spec.height) }
             log.add("Dùng thông số: \(spec)")
 
-            session.alertMessage = "Đang chuẩn bị ảnh…"
             let (pw, ph) = spec.portraitSize
             let portrait = render(spec)
             guard portrait.count == pw * ph else { throw CaseError.badAPDU }
             let buf = EPaper.buffer(portrait: portrait, pw: pw, ph: ph, spec: spec, settings: settings)
-            let packed = EPaper.pack(buf, width: spec.width, height: spec.height, bpp: spec.bpp)
-            let b = EPaper.imageAPDUs(packed: packed, compress: settings.compress, fragmentSize: settings.fragmentSize)
+            let packed = EPaper.pack(buf, width: spec.width, height: spec.height, bpp: spec.bpp, order: settings.bitOrder)
+            let b = settings.compress
+                ? EPaper.imageAPDUs(packed: packed, compress: true, fragmentSize: settings.fragmentSize)
+                : EPaper.rawAPDUs(packed: packed, chunk: settings.fragmentSize)
             blocks = b
             totalFragments = b.reduce(0) { $0 + $1.count }
-            log.add("Dữ liệu \(packed.count) byte → \(b.count) khối, \(totalFragments) lệnh (nén: \(settings.compress ? "có" : "không"), mảnh \(settings.fragmentSize) byte)")
-        } else if settings.reauthOnResume {
-            if link.isMifare {
-                try await tx(link, EPaper.selectAID, "Chọn ứng dụng", mustSucceed: false)
-            }
-            try await tx(link, EPaper.auth, "Xác thực lại", mustSucceed: false)
+            log.add("Dữ liệu \(packed.count) byte → \(totalFragments) lệnh (\(settings.compress ? "F0 D3 nén" : "F0 D2 thô"), gói \(settings.fragmentSize) byte, bit \(settings.bitOrder))")
         }
 
+        try await powerUpAndAccess(link, session)
         guard let blocks else { throw CaseError.badAPDU }
 
         while nextBlock < blocks.count {
@@ -357,8 +374,7 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
                 return
             }
             for (fi, frag) in blocks[nextBlock].enumerated() {
-                let label = "Khối \(nextBlock + 1)/\(blocks.count) mảnh \(fi + 1)"
-                // Ghi chi tiết vài lệnh đầu để dễ gỡ lỗi
+                let label = "Khối \(nextBlock + 1)/\(blocks.count) gói \(fi + 1)"
                 if sentFragments < 3 {
                     log.add("→ \(label): \(frag.prefix(16).hex) … (\(frag.count) byte)")
                 }
@@ -375,22 +391,34 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
             let pct = Int(Double(sentFragments) / Double(max(totalFragments, 1)) * 100)
             session.alertMessage = "Đang gửi ảnh… \(pct)%"
         }
-        let sendTime = Date().timeIntervalSince(startedAt)
-        log.add(String(format: "Gửi xong dữ liệu sau %.1f giây", sendTime))
+        log.add(String(format: "Gửi xong dữ liệu sau %.1f giây", Date().timeIntervalSince(startedAt)))
 
-        if Date().timeIntervalSince(connectedAt) > connectBudget {
+        // Làm mới trên một lần kết nối mới để có đủ thời gian
+        if !refreshPending && Date().timeIntervalSince(connectedAt) > 2 + Double(settings.prechargeMs) / 1000 {
+            refreshPending = true
             reconnect(session)
             return
         }
 
-        session.alertMessage = "Đang làm mới màn hình ốp (10–30 giây)… giữ yên máy"
+        session.alertMessage = "Đang làm mới màn hình ốp (20–40 giây)… giữ yên máy"
+        let t0 = Date()
         let r = try await tx(link, EPaper.refreshBlocking, "Làm mới màn hình", mustSucceed: false)
-        if r.ok {
-            log.add(String(format: "Hoàn tất sau %.1f giây", Date().timeIntervalSince(startedAt)))
-            succeed(session, "Xong! Ảnh đã lên ốp.")
-        } else {
-            throw CaseError.status("Làm mới màn hình", r.sw1, r.sw2)
+        log.add(String(format: "Lệnh làm mới trả lời sau %.1f giây", Date().timeIntervalSince(t0)))
+        if !r.ok {
+            log.add("Làm mới kiểu chờ bị từ chối, thử kiểu không chờ…")
+            let r2 = try await tx(link, EPaper.refreshNonBlocking, "Làm mới (không chờ)", mustSucceed: false)
+            if !r2.ok { throw CaseError.status("Làm mới màn hình", r2.sw1, r2.sw2) }
         }
+        // Theo dõi trạng thái nếu còn thời gian
+        var busySeen = false
+        while Date().timeIntervalSince(connectedAt) < 18 {
+            let st = try await tx(link, EPaper.refreshStatus, "Trạng thái", quiet: true, mustSucceed: false)
+            if st.data.first == 0x01 { busySeen = true } else { break }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        log.add("Trạng thái sau làm mới: \(busySeen ? "đã thấy bận rồi rảnh" : "rảnh")")
+        log.add(String(format: "Hoàn tất sau %.1f giây", Date().timeIntervalSince(startedAt)))
+        succeed(session, "Xong! Ảnh đã lên ốp.")
     }
 
     /// Gửi một mảnh; nếu bị từ chối vì chưa xác thực (69 82) thì xác thực rồi thử lại một lần.
@@ -398,7 +426,7 @@ final class CaseNFC: NSObject, NFCTagReaderSessionDelegate {
         let r = try await tx(link, frag, label, quiet: true, mustSucceed: false)
         if r.ok { return }
         if r.sw1 == 0x69 {
-            try await tx(link, EPaper.auth, "Xác thực lại", mustSucceed: false)
+            try await tx(link, EPaper.access, "Kiểm tra quyền lại", mustSucceed: false)
             try await tx(link, frag, label + " (thử lại)", quiet: true, mustSucceed: true)
             return
         }

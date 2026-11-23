@@ -361,6 +361,8 @@ struct SettingsView: View {
     @AppStorage("colorOrder") private var colorOrder = "BWYR"
     @AppStorage("reauthOnResume") private var reauthOnResume = false
     @AppStorage("compress") private var compress = true
+    @AppStorage("prechargeMs") private var prechargeMs = 2000
+    @AppStorage("bitOrder") private var bitOrder = "msb"
     @AppStorage("fragmentSize") private var fragmentSize = 250
     @AppStorage("detW") private var detW = 0
     @AppStorage("detH") private var detH = 0
@@ -400,8 +402,17 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("Xác thực lại sau khi kết nối lại", isOn: $reauthOnResume)
-                    Toggle("Nén dữ liệu (LZO)", isOn: $compress)
+                    Picker("Chờ ốp nạp điện", selection: $prechargeMs) {
+                        Text("1 giây").tag(1000)
+                        Text("2 giây").tag(2000)
+                        Text("3 giây").tag(3000)
+                        Text("5 giây").tag(5000)
+                    }
+                    Picker("Thứ tự điểm ảnh", selection: $bitOrder) {
+                        Text("Trái→phải (FMSC)").tag("msb")
+                        Text("Phải→trái (kiểu cũ)").tag("lsb")
+                    }
+                    Toggle("Nén dữ liệu (F0 D3); tắt = gửi thô F0 D2", isOn: $compress)
                     Picker("Cỡ mỗi gói", selection: $fragmentSize) {
                         Text("250 byte").tag(250)
                         Text("200 byte").tag(200)
